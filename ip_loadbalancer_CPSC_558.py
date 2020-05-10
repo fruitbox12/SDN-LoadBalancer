@@ -38,8 +38,9 @@ import pox.openflow.libopenflow_01 as of
 import time
 import random
 
-FLOW_IDLE_TIMEOUT = 10
+FLOW_IDLE_TIMEOUT = 5
 FLOW_MEMORY_TIMEOUT = 60 * 5
+UPDATE_DATA_FLOW = 12
 
 
 
@@ -97,27 +98,39 @@ class iplb (object):
 
   We probe the servers to see if they're alive by sending them ARPs.
   """
-  def __init__ (self, connection, service_ip, weights, servers = [],loadBalancerType = 0):
+  def __init__ (self, connection, service_ip, servers,method,weights,loadBalancerType):
     self.service_ip = IPAddr(service_ip)
     self.servers = [IPAddr(a) for a in servers]
-    #self.select_servers = [IPAddr(a) for a in servers]
-    #self.method= method
-    self.loadBalancerType = loadBalancerType
+    self.method = method
     self.con = connection
     self.mac = self.con.eth_addr
-    self.live_servers = {} # IP -> MAC,port
     self.weights = weights
+    self.live_servers = {} # IP -> MAC,port
+    self.loadBalancerType = loadBalancerType
     self.select_servers = []
-    log.info('loadbalancer type is {} and {}'.format(loadBalancerType,self.loadBalancerType))
-    if self.loadBalancerType == 2:
-        #self.weights = weights
-      for index,server in enumerate(self.servers):
-        temp = []
-        temp.append(server)
-        self.select_servers += temp * int(self.weights[index])
-        log.info('printing server list {}'.format(self.select_servers))
-    elif loadBalancerType == 1:
-        self.select_servers = [IPAddr(a) for a in servers]
+    self.server_weights = {}
+    
+
+    for index,ip in enumerate(self.servers):
+        self.server_weights[ip] = weights[index]
+
+    if loadBalancerType == 2:
+        self.select_servers = []
+        for index,server in enumerate(self.servers):
+          temp = []
+          temp.append(server)
+          self.select_servers = self.select_servers + temp * int(self.server_weights[server])
+    else:
+        self.select_servers = self.servers
+          
+
+    
+    
+
+    log.info('selected server list is {}'.format(self.select_servers))
+
+
+          
     try:
       self.log = log.getChild(dpid_to_str(self.con.dpid))
     except:
@@ -132,6 +145,13 @@ class iplb (object):
 
     # How long do we wait for an ARP reply before we consider a server dead?
     self.arp_timeout = 3
+
+    self.last_update = time.time()
+    # Data transferred map (IP -> data transferred in the last 
+    # UPDATE_DATA_FLOW seconds).
+    self.data_flow = {}
+    for server in self.servers:
+      self.data_flow[server] = 0
 
     # We remember where we directed flows so that if they start up again,
     # we can send them to the same server if it's still up.  Alternate
@@ -150,8 +170,6 @@ class iplb (object):
     Each of these should only have a limited lifetime.
     """
     t = time.time()
-    #log.info('timestamp is {}'.format(t))
-
     # Expire probes
     for ip,expire_at in self.outstanding_probes.items():
       if t > expire_at:
@@ -159,9 +177,9 @@ class iplb (object):
         if ip in self.live_servers:
           self.log.warn("Server %s down", ip)
           del self.live_servers[ip]
+          # del self.server_weights[ip]
           while ip in self.select_servers:
-           self.select_servers.remove(ip)
-           self.log.warn('removed server {} from list'.format(ip))
+                self.select_servers.remove(ip)
 
     # Expire old flows
     c = len(self.memory)
@@ -210,46 +228,50 @@ class iplb (object):
     r = max(.25, r) # Cap it at four per second
     return r
 
+  def round_robin(self):
+        choose_server = self.select_servers.pop(0)
+        self.select_servers.append(choose_server)
+        log.info('server choosen is {} using round_robin'.format(choose_server))
+        return choose_server
+       
+  def random_selection(self):
+        choose_server = random.choice(self.live_servers.keys())
+        log.info('server choosen is {} using random method'.format(choose_server))
+        return choose_server
+
+  def least_connection(self):
+        servers = self.servers
+        weights = self.server_weights
+        data_flow = self.data_flow      
+        choose_server = self.servers[0]
+        priorityValue = data_flow[choose_server] / int(weights[choose_server])
+        for id in range(1,len(self.servers)):
+              priorityValue2 = self.data_flow[servers[id]] / int(weights[servers[id]])
+              if priorityValue > priorityValue2:
+                    choose_server = servers[id]
+        log.info('server choosen is {} using least connection method'.format(choose_server))
+        return choose_server
+              
+              
+        
+        
+        
+
   def _pick_server (self, key, inport):
     """
     Pick a server for a (hopefully) new connection
     """
-    #self._do_probe()
-   
-    #self._do_expire()
-    #log.info('selected routing method %s and  probes are %s and timestamp is %s',self.method, self.outstanding_probes,time.time())
-    #self._do_expire()
-    if self.loadBalancerType == 1:
-      choose_server = self.select_servers.pop(0)
-      self.select_servers.append(choose_server)
-      log.info('server choosen is {} using round robin'.format(choose_server))
-      return choose_server
-    elif self.loadBalancerType == 2:
-      choose_server = self.select_servers.pop(0)
-      self.select_servers.append(choose_server)
-      log.info('server choosen is {} using weighted_round_robin'.format(choose_server))
-      return choose_server
-
+    if self.loadBalancerType == 0:
+          return self.random_selection()
+    elif self.loadBalancerType == 3:
+          return self.least_connection()
     else:
-      choose_server = random.choice(self.live_servers.keys())
-      log.info('server choosen is {} using method random'.format(choose_server))
-      return choose_server
-
-    #choose_server = self.live_servers.keys().pop()
-    #log.info('server list before editing %s and method is %s',self.select_servers,self.method)
-    #choose_server = self.select_servers.pop(0)
-
-    #self.servers.insert(0,choose_server)
-    #self.select_servers.append(choose_server)
-    #return choose_server
-    #log.info('server choosen is {}'.format(choose_server))
-    # return self.livxe_servers.keys()[IPAddr(choose_server)]
-    #return random.choice(self.live_servers.keys())
+          return self.round_robin()
 
   def _handle_PacketIn (self, event):
     inport = event.port
     packet = event.parsed
-
+    #log.info('packet response {}'.format(packet))
     def drop ():
       if event.ofp.buffer_id is not None:
         # Kill the buffer
@@ -269,23 +291,30 @@ class iplb (object):
             if (self.live_servers.get(arpp.protosrc, (None,None))
                 == (arpp.hwsrc,inport)):
               # Ah, nothing new here.
-              #self.log.info('server $$$$$ %s',arpp.protosrc)
               pass
             else:
               # Ooh, new server.
               self.live_servers[arpp.protosrc] = arpp.hwsrc,inport
-              #self.log.info("Server %s up", arpp.protosrc)
-        #else:
-         #self.log.info("Server %s else up", arpp.protosrc)
-
+              self.data_flow[arpp.protosrc] = 0
+              # if arpp.protosrc not in self.weights.keys():
+              #  self.weights[arpp.protosrc] = 1
+              # tempServerList = []
+              # tempServerList.append(arpp.protosrc)
+              # self.select_servers += tempServerList
+              self.log.info("Server %s up", arpp.protosrc)
         return
 
       # Not TCP and not ARP.  Don't know what to do with this.  Drop it.
       return drop()
-
     # It's TCP.
 
     ipp = packet.find('ipv4')
+
+    # Update the data count table, if needed.
+    if time.time() - self.last_update > UPDATE_DATA_FLOW:
+      for server in self.data_flow.keys():
+        self.data_flow[server] = 0
+      self.last_update = time.time()
 
     if ipp.srcip in self.servers:
       # It's FROM one of our balanced servers.
@@ -321,6 +350,7 @@ class iplb (object):
                             match=match)
       self.con.send(msg)
 
+
     elif ipp.dstip == self.service_ip:
       # Ah, it's for our service IP and needs to be load balanced
 
@@ -335,6 +365,9 @@ class iplb (object):
 
         # Pick a server for this flow
         server = self._pick_server(key, inport)
+        self.log.debug('selected server is %s', server)
+  
+        # self.servers.append(server)
         self.log.debug('re-arranged server list is %s %s',server,self.select_servers)
         self.log.debug("Directing traffic to %s", server)
         entry = MemoryEntry(server, packet, inport)
@@ -366,30 +399,35 @@ class iplb (object):
 _dpid = None
 
 
-def launch (ip, servers, dpid = None,method='default',weights=None):
+def launch (ip, servers, dpid = None,method='default',weights=[]):
   global _dpid
   if dpid is not None:
     _dpid = str_to_dpid(dpid)
 
-  if weights:
-   weights = weights.split(',')
-  else:
-   weights = [0,0,0]
-
   servers = servers.replace(","," ").split()
   servers = [IPAddr(x) for x in servers]
   ip = IPAddr(ip)
-  loadBalancerType = 0
-  log.info('method is {} and loadBalancerType is {}'.format(method,loadBalancerType))
-  if method == 'round_robin':
-    loadBalancerType = 1
-    log.info('method is {} and loadBalancerType is {}'.format(method,loadBalancerType))
-
-  elif method == 'weighted_round_robin':
-    loadBalancerType = 2
-    log.info('method is {} and loadBalancerType is {}'.format(method,loadBalancerType))
-
+  weights_selected = []
+  if weights and len(weights) > 0:
+    weights_selected = weights.split(',')
+  else:
+    for i in servers:
+          weights_selected.append(1)
   
+  if len(weights_selected) is not len(servers):
+        log.error('length of weights and servers are not equal')
+        exit(1)
+
+              
+
+  loadBalancerType = 0
+  if method == 'round_robin':
+        loadBalancerType = 1
+  elif method == 'weighted_round_robin':
+        loadBalancerType = 2
+  elif method == 'least_connection':
+        loadBalancerType = 3
+      
   # We only want to enable ARP Responder *only* on the load balancer switch,
   # so we do some disgusting hackery and then boot it up.
   from proto.arp_responder import ARPResponder
@@ -416,14 +454,34 @@ def launch (ip, servers, dpid = None,method='default',weights=None):
     else:
       if not core.hasComponent('iplb'):
         # Need to initialize first...
-        core.registerNew(iplb, event.connection, IPAddr(ip), weights, servers, loadBalancerType)
+        # log.info('server_weights'.format(server_weights))
+        core.registerNew(iplb, event.connection, IPAddr(ip),servers,method,weights_selected,loadBalancerType)
         log.info("IP Load Balancer Ready.")
       log.info("Load Balancing on %s", event.connection)
 
       # Gross hack
       core.iplb.con = event.connection
       event.connection.addListeners(core.iplb)
+  
+  def _handle_FlowStatsReceived (event):
+    for f in event.stats:
+      ip_dst = f.match.nw_dst
+      ip_src = f.match.nw_src
 
+      if ip_dst != None and IPAddr(ip_dst) in core.iplb.servers:
+        core.iplb.data_flow[IPAddr(ip_dst)] += f.byte_count
 
+      if ip_src != None and IPAddr(ip_src) in core.iplb.servers:
+        core.iplb.data_flow[IPAddr(ip_src)] += f.byte_count
+
+  core.openflow.addListenerByName("FlowStatsReceived", _handle_FlowStatsReceived)
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
 
+  from pox.lib.recoco import Timer
+
+  def _timer_getStats ():
+    for connection in core.openflow._connections.values():
+      connection.send(of.ofp_stats_request(body=of.ofp_flow_stats_request()))
+
+  # Request flow stats every FLOW_IDLE_TIMEOUT second.
+  Timer(FLOW_IDLE_TIMEOUT, _timer_getStats, recurring=True) 
