@@ -107,7 +107,7 @@ class iplb (object):
     self.weights = weights
     self.live_servers = {} # IP -> MAC,port
     self.loadBalancerType = loadBalancerType
-    self.select_servers = []
+    #self.select_servers = []
     self.server_weights = {}
     
 
@@ -120,16 +120,11 @@ class iplb (object):
           temp = []
           temp.append(server)
           self.select_servers = self.select_servers + temp * int(self.server_weights[server])
+          #log.info('test $$$$$$$$$$ {}'.format(self.select_servers))
     else:
-        self.select_servers = self.servers
-          
-
+        self.select_servers = [IPAddr(a) for a in servers]
     
-    
-
-    log.info('selected server list is {}'.format(self.select_servers))
-
-
+    log.debug('selected server list is {}'.format(self.select_servers))
           
     try:
       self.log = log.getChild(dpid_to_str(self.con.dpid))
@@ -239,7 +234,7 @@ class iplb (object):
         log.info('server choosen is {} using random method'.format(choose_server))
         return choose_server
 
-  def least_connection(self):
+  def least_bandwidth(self):
         servers = self.servers
         weights = self.server_weights
         data_flow = self.data_flow      
@@ -249,12 +244,13 @@ class iplb (object):
               priorityValue2 = self.data_flow[servers[id]] / int(weights[servers[id]])
               if priorityValue > priorityValue2:
                     choose_server = servers[id]
+        log.info('data flow object {}'.format(self.data_flow))
         log.info('server choosen is {} using least connection method'.format(choose_server))
         return choose_server
               
               
         
-        
+                
         
 
   def _pick_server (self, key, inport):
@@ -264,7 +260,7 @@ class iplb (object):
     if self.loadBalancerType == 0:
           return self.random_selection()
     elif self.loadBalancerType == 3:
-          return self.least_connection()
+          return self.least_bandwidth()
     else:
           return self.round_robin()
 
@@ -368,7 +364,7 @@ class iplb (object):
         self.log.debug('selected server is %s', server)
   
         # self.servers.append(server)
-        self.log.debug('re-arranged server list is %s %s',server,self.select_servers)
+        #self.log.debug('re-arranged server list is %s %s',server,self.select_servers)
         self.log.debug("Directing traffic to %s", server)
         entry = MemoryEntry(server, packet, inport)
         self.memory[entry.key1] = entry
@@ -425,7 +421,7 @@ def launch (ip, servers, dpid = None,method='default',weights=[]):
         loadBalancerType = 1
   elif method == 'weighted_round_robin':
         loadBalancerType = 2
-  elif method == 'least_connection':
+  elif method == 'least_bandwidth':
         loadBalancerType = 3
       
   # We only want to enable ARP Responder *only* on the load balancer switch,
@@ -464,15 +460,15 @@ def launch (ip, servers, dpid = None,method='default',weights=[]):
       event.connection.addListeners(core.iplb)
   
   def _handle_FlowStatsReceived (event):
-    for f in event.stats:
-      ip_dst = f.match.nw_dst
-      ip_src = f.match.nw_src
+    for data in event.stats:
+      ip_dst = data.match.nw_dst
+      ip_src = data.match.nw_src
 
       if ip_dst != None and IPAddr(ip_dst) in core.iplb.servers:
-        core.iplb.data_flow[IPAddr(ip_dst)] += f.byte_count
+        core.iplb.data_flow[IPAddr(ip_dst)] += data.byte_count
 
       if ip_src != None and IPAddr(ip_src) in core.iplb.servers:
-        core.iplb.data_flow[IPAddr(ip_src)] += f.byte_count
+        core.iplb.data_flow[IPAddr(ip_src)] += data.byte_count
 
   core.openflow.addListenerByName("FlowStatsReceived", _handle_FlowStatsReceived)
   core.openflow.addListenerByName("ConnectionUp", _handle_ConnectionUp)
@@ -485,3 +481,4 @@ def launch (ip, servers, dpid = None,method='default',weights=[]):
 
   # Request flow stats every FLOW_IDLE_TIMEOUT second.
   Timer(FLOW_IDLE_TIMEOUT, _timer_getStats, recurring=True) 
+
