@@ -9,3 +9,5 @@ pox/pox.py log.level --DEBUG --ip <SERVER IP> --servers <List of IP's> --method 
 Example:
 
 pox/pox.py log.level --DEBUG --ip 10.0.1.1 --servers 10.0.0.1,10.0.0.2,10.0.0.3 --method 'weighted_round_robin' --weights '3,2,1'
+
+For full details, please refer final document in the repository.
